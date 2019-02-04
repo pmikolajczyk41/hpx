@@ -264,10 +264,10 @@ namespace detail
         // continuation support
 
         // deferred execution of a given continuation
-        bool run_on_completed(completed_callback_type&& on_completed,
-            std::exception_ptr& ptr);
-        bool run_on_completed(completed_callback_vector_type&& on_completed,
-            std::exception_ptr& ptr);
+        std::exception_ptr run_on_completed(
+            completed_callback_type&& on_completed);
+        std::exception_ptr run_on_completed(
+            completed_callback_vector_type&& on_completed);
 
         // make sure continuation invocation does not recurse deeper than
         // allowed
