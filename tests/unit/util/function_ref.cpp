@@ -436,17 +436,24 @@ struct add_with_throw_on_copy {
     }
 };
 
+int test_ref(hpx::util::function_ref<int(int, int)> f)
+{
+    return f(1, 3);
+}
+
 static void
     test_ref()
 {
     add_with_throw_on_copy atc;
     try {
-        hpx::util::function_ref<int (int, int)> f(std::ref(atc));
+        hpx::util::function_ref<int (int, int)> f(atc);
         HPX_TEST(f(1, 3) == 4);
     }
     catch(std::runtime_error const& /*e*/) {
         HPX_TEST_MSG(false, "Nonthrowing constructor threw an exception");
     }
+
+    HPX_TEST(test_ref(std::ref(atc)) == 4);
 }
 
 static void
