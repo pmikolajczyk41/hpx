@@ -1,3 +1,4 @@
+//  Copyright (c) 2019 Thomas Heller
 //  Copyright (c) 2017 Agustin Berge
 //  Copyright (c) 2017 Google
 //
@@ -9,14 +10,11 @@
 
 #include <hpx/config.hpp>
 #include <hpx/error_code.hpp>
-#include <hpx/util/detail/pack.hpp>
-#include <hpx/util/tuple.hpp>
 
 #include <cstddef>
 #include <exception>
 #include <memory>
 #include <type_traits>
-#include <typeinfo>
 #include <utility>
 
 #if defined(HPX_WINDOWS)
@@ -26,6 +24,28 @@
 
 namespace hpx
 {
+    namespace detail {
+        class exception_info_node_base
+        {
+        public:
+            virtual ~exception_info_node_base() = default;
+
+            std::shared_ptr<exception_info_node_base> next;
+        };
+
+        template <typename Tag, typename T>
+        struct exception_info_node_data
+        {
+            template <typename U>
+            exception_info_node_data(U&& t)
+              : data(std::forward<U>(t))
+            {
+            }
+
+            T data;
+        };
+    }
+
     ///////////////////////////////////////////////////////////////////////////
     template <typename Tag, typename Type>
     struct error_info
@@ -38,8 +58,23 @@ namespace hpx
         {}
 
         explicit error_info(Type&& value)
-          : _value(std::forward<Type>(value))
+          : _value(std::move(value))
         {}
+
+        static Type const* lookup(
+            const detail::exception_info_node_base* node_base) noexcept
+        {
+            auto node = dynamic_cast<
+                const detail::exception_info_node_data<Tag, Type>*>(node_base);
+            if (node)
+                return &node->data;
+
+            if (node_base->next)
+            {
+                return lookup(node_base->next.get());
+            }
+            return nullptr;
+        }
 
         Type _value;
     };
@@ -60,73 +95,38 @@ namespace hpx
     ///////////////////////////////////////////////////////////////////////////
     namespace detail
     {
-        class exception_info_node_base
-        {
-        public:
-            virtual ~exception_info_node_base() = default;
-            virtual void const* lookup(std::type_info const& tag) const noexcept = 0;
-
-            std::shared_ptr<exception_info_node_base> next;
-        };
-
-        template <typename ...Ts>
+        template <typename... Ts>
         class exception_info_node
           : public exception_info_node_base
+          , public exception_info_node_data<typename Ts::tag,
+                typename Ts::type>...
         {
         public:
-            template <typename ...ErrorInfo>
-            explicit exception_info_node(
-                ErrorInfo&&... tagged_values)
-              : data(tagged_values._value...)
-            {}
-
-            template <std::size_t ...Is>
-            void const* _lookup(
-                util::detail::pack_c<std::size_t, Is...>,
-                std::type_info const& tag) const noexcept
+            explicit exception_info_node(Ts&&... tagged_values)
+              : exception_info_node_data<typename Ts::tag, typename Ts::type>(
+                    std::move(tagged_values._value))...
             {
-                using entry_type = std::pair<std::type_info const&, void const*>;
-                entry_type const entries[] = {
-                    {typeid(typename Ts::tag), std::addressof(util::get<Is>(data))}...
-                };
-
-                for (auto const& entry : entries)
-                {
-                    if (entry.first == tag)
-                        return entry.second;
-                }
-                return nullptr;
             }
-
-            void const* lookup(std::type_info const& tag) const noexcept override
+            explicit exception_info_node(Ts const&... tagged_values)
+              : exception_info_node_data<typename Ts::tag, typename Ts::type>(
+                    tagged_values._value)...
             {
-                using indices_pack =
-                    typename util::detail::make_index_pack<sizeof...(Ts)>::type;
-                if (void const* value = _lookup(indices_pack(), tag))
-                    return value;
-
-                return next ? next->lookup(tag) : nullptr;
             }
-
-            using exception_info_node_base::next;
-            util::tuple<typename Ts::type...> data;
         };
     }
 
     ///////////////////////////////////////////////////////////////////////////
     class exception_info
     {
-        using node_ptr = std::shared_ptr<detail::exception_info_node_base>;
+        using node_ptr = std::unique_ptr<detail::exception_info_node_base>;
 
     public:
         exception_info() noexcept
           : _data(nullptr)
         {}
 
-        exception_info(exception_info const& other) noexcept = default;
         exception_info(exception_info&& other) noexcept = default;
 
-        exception_info& operator=(exception_info const& other) noexcept = default;
         exception_info& operator=(exception_info&& other) noexcept = default;
 
         virtual ~exception_info() = default;
@@ -137,7 +137,8 @@ namespace hpx
             using node_type = detail::exception_info_node<
                 ErrorInfo...>;
 
-            node_ptr node = std::make_shared<node_type>(std::move(tagged_values)...);
+            node_ptr node(
+                new node_type(std::forward<ErrorInfo>(tagged_values)...));
             node->next = std::move(_data);
             _data = std::move(node);
             return *this;
@@ -147,8 +148,8 @@ namespace hpx
         typename Tag::type const* get() const noexcept
         {
             auto const* data = _data.get();
-            return static_cast<typename Tag::type const*>(
-                data ? data->lookup(typeid(typename Tag::tag)) : nullptr);
+
+            return data ? Tag::lookup(data) : nullptr;
         }
 
     private:
@@ -158,30 +159,19 @@ namespace hpx
     ///////////////////////////////////////////////////////////////////////////
     namespace detail
     {
-        struct exception_with_info_base
-          : public exception_info
-        {
-            exception_with_info_base(std::type_info const& type, exception_info xi)
-              : exception_info(std::move(xi))
-              , type(type)
-            {}
-
-            std::type_info const& type;
-        };
-
         template <typename E>
         struct exception_with_info
           : public E
-          , public exception_with_info_base
+          , public exception_info
         {
             explicit exception_with_info(E const& e, exception_info xi)
               : E(e)
-              , exception_with_info_base(typeid(E), std::move(xi))
+              , exception_info(std::move(xi))
             {}
 
             explicit exception_with_info(E&& e, exception_info xi)
               : E(std::move(e))
-              , exception_with_info_base(typeid(E), std::move(xi))
+              , exception_info(std::move(xi))
             {}
         };
     }
@@ -202,25 +192,6 @@ namespace hpx
             "E shall not derive from exception_info");
 
         throw detail::exception_with_info<ED>(std::forward<E>(e), std::move(xi));
-    }
-
-    template <typename E> HPX_NORETURN
-    void throw_with_info(E&& e, exception_info const& xi)
-    {
-        throw_with_info(std::forward<E>(e), exception_info(xi));
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    template <typename E>
-    exception_info* get_exception_info(E& e)
-    {
-        return dynamic_cast<exception_info*>(std::addressof(e));
-    }
-
-    template <typename E>
-    exception_info const* get_exception_info(E const& e)
-    {
-        return dynamic_cast<exception_info const*>(std::addressof(e));
     }
 
     ///////////////////////////////////////////////////////////////////////////
