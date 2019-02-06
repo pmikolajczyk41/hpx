@@ -29,6 +29,11 @@ get junit2html:
     script:
       - cd build
       - ninja ${TESTS}
+      # Setting aliases to tell mpi that we are sure to run as
+      # root. This is to make runs inside a docker container
+      # possible without changes to the base docker image
+      - alias mpiexec='mpiexec --allow-run-as-root'
+      - alias mpirun='mpirun --allow-run-as-root'
       - ctest -T test --no-compress-output --output-on-failure -R ${TESTS}
     after_script:
       - xsltproc conv.xsl build/Testing/`head -n 1 < build/Testing/TAG`/Test.xml > ${TESTS}.xml
